@@ -1,0 +1,6 @@
+scapy
+python-nmap
+numpy
+scikit-learn
+pytest
+flake8
