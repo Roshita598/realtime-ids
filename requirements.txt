@@ -4,3 +4,7 @@ numpy
 scikit-learn
 pytest
 flake8
+pandas
+streamlit
+joblib
+matplotlib

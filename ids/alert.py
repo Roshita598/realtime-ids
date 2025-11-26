@@ -1,63 +1,91 @@
-# ids/alert.py
 import json
-import time
+import os
+import smtplib
+from email.mime.text import MIMEText
+import requests
+from twilio.rest import Client
 
-def _json_serializer(obj):
-    """
-    Try to convert common non-serializable types to simple serializable forms.
-    - Try int(...) first (works for many Scapy flag/number types).
-    - Fallback to str(obj).
-    """
-    try:
-        return int(obj)
-    except Exception:
-        try:
-            return float(obj)
-        except Exception:
-            return str(obj)
+ALERT_LOG = os.path.join(os.path.dirname(__file__), "..", "alerts.log")
 
 class AlertSystem:
-    def __init__(self, logfile="ids_alerts.log"):
+
+    def __init__(self, logfile=ALERT_LOG):
         self.logfile = logfile
 
-    def send_alert(self, alert_type_or_dict, features):
-        """
-        alert_type_or_dict: either a string alert_type or a dict produced by the engine.
-        features: the raw features dict (may include Scapy objects).
-        """
-        # Normalize alert object to a dict with predictable fields
-        if isinstance(alert_type_or_dict, str):
-            alert_obj = {"alert_type": alert_type_or_dict}
-        elif isinstance(alert_type_or_dict, dict):
-            # Engine now returns richer dicts like {"type": "signature", "rule": "syn_flood_rule"}
-            # Map to a stable top-level key "alert_type" while keeping details in "details"
-            alert_type = alert_type_or_dict.get("type") or alert_type_or_dict.get("alert_type") or "unknown"
-            # include rest of the engine-provided keys under "meta"
-            meta = {k: v for k, v in alert_type_or_dict.items() if k != "type" and k != "alert_type"}
-            alert_obj = {"alert_type": alert_type, "meta": meta}
-        else:
-            alert_obj = {"alert_type": "unknown", "meta": {"raw": str(alert_type_or_dict)}}
+        self.email_enabled = False
+        self.sms_enabled = False
+        self.slack_enabled = False
 
-        # Create a serializable copy of features
-        serializable_features = {}
-        for k, v in (features or {}).items():
-            try:
-                # try the common case first
-                json.dumps(v)
-                serializable_features[k] = v
-            except Exception:
-                # fallback to the serializer
-                serializable_features[k] = _json_serializer(v)
+        # Email settings
+        self.smtp_server = None
+        self.smtp_user = None
+        self.smtp_password = None
+        self.email_to = None
 
-        alert = {
-            "timestamp": time.time(),
-            "alert_type": alert_obj.get("alert_type"),
-            "meta": alert_obj.get("meta", {}),
-            "details": serializable_features
-        }
+        # Twilio settings
+        self.twilio_sid = None
+        self.twilio_token = None
+        self.twilio_from = None
+        self.twilio_to = None
 
-        # Use json.dumps with default serializer as a last-resort safety net
+        # Slack settings
+        self.slack_webhook = None
+
+    # ---------------- Log to file ----------------
+    def log(self, alert, features):
+        entry = {"type": alert, "features": features}
         with open(self.logfile, "a") as f:
-            f.write(json.dumps(alert, default=_json_serializer) + "\n")
+            f.write(json.dumps(entry) + "\n")
 
-        print(f"[ALERT] {alert_obj.get('alert_type')} detected! meta={alert_obj.get('meta')}")
+    # ---------------- Email ----------------
+    def setup_email(self, server, user, password, to):
+        self.email_enabled = True
+        self.smtp_server = server
+        self.smtp_user = user
+        self.smtp_password = password
+        self.email_to = to
+
+    def send_email(self, alert, features):
+        msg = MIMEText(str(features))
+        msg["Subject"] = f"IDS Alert: {alert}"
+        msg["From"] = self.smtp_user
+        msg["To"] = self.email_to
+
+        with smtplib.SMTP_SSL(self.smtp_server, 465) as server:
+            server.login(self.smtp_user, self.smtp_password)
+            server.send_message(msg)
+
+    # ---------------- Slack ----------------
+    def setup_slack(self, webhook):
+        self.slack_enabled = True
+        self.slack_webhook = webhook
+
+    def send_slack(self, alert, features):
+        payload = {"text": f"⚠️ IDS Alert: {alert}\n{features}"}
+        requests.post(self.slack_webhook, json=payload)
+
+    # ---------------- SMS (Twilio) ----------------
+    def setup_sms(self, sid, token, from_num, to_num):
+        self.sms_enabled = True
+        self.twilio_sid = sid
+        self.twilio_token = token
+        self.twilio_from = from_num
+        self.twilio_to = to_num
+
+    def send_sms(self, alert, features):
+        client = Client(self.twilio_sid, self.twilio_token)
+        body = f"IDS Alert: {alert}\n{features}"
+        client.messages.create(body=body, from_=self.twilio_from, to=self.twilio_to)
+
+    # ---------------- Main send_alert ----------------
+    def send_alert(self, alert, features):
+        self.log(alert, features)
+
+        if self.email_enabled:
+            self.send_email(alert, features)
+
+        if self.sms_enabled:
+            self.send_sms(alert, features)
+
+        if self.slack_enabled:
+            self.send_slack(alert, features)
